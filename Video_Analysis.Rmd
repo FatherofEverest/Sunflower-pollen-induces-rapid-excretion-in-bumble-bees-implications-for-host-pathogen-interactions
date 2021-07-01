@@ -1,0 +1,1051 @@
+---
+title: "Exp 18 - Gut Transit Time Experiment - Video Analysis"
+author: "Jonathan J. Giacomini"
+date: "10/20/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+First, load the packages that we will need.
+```{r, message=FALSE, warning=FALSE}
+library(survminer)
+library(survival)
+library(coxme)
+library(car)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(emmeans)
+```
+
+Set the working directory:
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Volumes/GoogleDrive/My Drive/POLLINATOR RESEARCH/PHD Work/Sunflower Pollen Experiments/Irwin Lab_Sunflower Pollen Experiments/Exp 18_Gut Transit Time/Videos/")
+```
+
+
+Load the following data sets.
+```{r}
+pooptime.df <- read.csv("GTT_Exp_Video_Data_TimeFirst5poops.csv", header = TRUE)
+# We can use this data set to analyze the effect of diet and infection treatments on the time until first poop, second and up the the fifth poop.
+
+twohourintervals.df <- read.csv("GTT_Exp_Video_Data_2hrIntervals.csv", header = TRUE)
+# We can use this data set to analyse the effects of pollen diet and infetcion trt on the poop rate (i.e. poops/2hr)
+```
+
+```{r}
+str(pooptime.df)
+pooptime.df$BeeID <- as.factor(pooptime.df$BeeID)
+```
+
+```{r}
+str(twohourintervals.df)
+twohourintervals.df$BeeID <- as.factor(twohourintervals.df$BeeID)
+```
+
+```{r}
+meta_gtt.df <- read.csv("/Volumes/GoogleDrive/My Drive/POLLINATOR RESEARCH/PHD Work/Sunflower Pollen Experiments/Irwin Lab_Sunflower Pollen Experiments/Exp 18_Gut Transit Time/GTT_Exp18_MetaData.csv", header = TRUE)
+
+meta_gtt.df$PollenDiet <- as.factor(meta_gtt.df$PollenDiet)
+meta_gtt.df$InfectionTrt <- as.factor(meta_gtt.df$InfectionTrt)
+meta_gtt.df$Round <- as.factor(meta_gtt.df$Round)
+meta_gtt.df$Microcolony <- as.factor(meta_gtt.df$Microcolony)
+meta_gtt.df$MotherColony <- as.factor(meta_gtt.df$MotherColony)
+meta_gtt.df$BeeID <- as.factor(meta_gtt.df$BeeID)
+str(meta_gtt.df)
+```
+
+We need to merge the meta df with the pooptime df.
+```{r}
+pooptime.df <- pooptime.df %>% 
+  full_join(x = pooptime.df, y = meta_gtt.df, by = c("BeeID" = "BeeID")) 
+str(pooptime.df)
+```
+
+We need to merge the meta df with the 2 hour intervals df.
+```{r}
+twohourintervals.df <- twohourintervals.df %>% 
+  full_join(x = twohourintervals.df, y = meta_gtt.df, by = c("BeeID" = "BeeID")) 
+str(twohourintervals.df)
+```
+
+Filter by Eggs and Deaths
+```{r}
+pooptime.noEggs.noDead.df <- pooptime.df %>% 
+  filter(Eggs != 1) %>% 
+  filter(Death != 1)
+
+twohourintervals.noEggs.noDead.df <- twohourintervals.df %>% 
+  filter(Eggs != 1) %>% 
+  filter(Death != 1)
+
+```
+
+
+###############################################################################################  
+# Time-to-event analysis 
+################################################################################################  
+
+Now we need to translate H:M:S into seconds. We'll make a new variable called Poop#_secs, where # is either 1, 2, 3, 4 or 5 and use the lubridate package to translate H:M:S to seconds. 
+```{r}
+pooptime.noEggs.noDead.df$Poop1_secs <- period_to_seconds(hms(pooptime.noEggs.noDead.df$Poop1))
+pooptime.noEggs.noDead.df$Poop2_secs <- period_to_seconds(hms(pooptime.noEggs.noDead.df$Poop2))
+pooptime.noEggs.noDead.df$Poop3_secs <- period_to_seconds(hms(pooptime.noEggs.noDead.df$Poop3))
+pooptime.noEggs.noDead.df$Poop4_secs <- period_to_seconds(hms(pooptime.noEggs.noDead.df$Poop4))
+pooptime.noEggs.noDead.df$Poop5_secs <- period_to_seconds(hms(pooptime.noEggs.noDead.df$Poop5))
+```
+
+We need the data set to be in long form. We can use dplyr to gather the columns into two new columns named "poop" and "time". 
+```{r}
+Long.pooptime.df <- pooptime.noEggs.noDead.df %>% 
+  tidyr::gather(key = "poop", value = "time", Poop1_secs, Poop2_secs, Poop3_secs, Poop4_secs, Poop5_secs) %>% 
+  dplyr::select(PollenDiet, InfectionTrt, poop, time, Round, BeeID, Microcolony, MotherColony, Parasite.load, PollenConsump, NectarConsump, WingSize)
+```
+
+Let's recode the values for the new "poop" variable to make them more concise.
+```{r}
+Long.pooptime.df$poop[Long.pooptime.df$poop == "Poop1_secs"] <- "1"
+Long.pooptime.df$poop[Long.pooptime.df$poop == "Poop2_secs"] <- "2"
+Long.pooptime.df$poop[Long.pooptime.df$poop == "Poop3_secs"] <- "3"
+Long.pooptime.df$poop[Long.pooptime.df$poop == "Poop4_secs"] <- "4"
+Long.pooptime.df$poop[Long.pooptime.df$poop == "Poop5_secs"] <- "5"
+```
+
+And set "poop" as a factor.
+```{r}
+Long.pooptime.df$poop <- as.factor(Long.pooptime.df$poop)
+#str(Long.pooptime.df) # use this to check that it worked
+```
+
+We also need to code an event variable that is bianry (1 = yes, 0 = no) 
+```{r}
+Long.pooptime.df <- Long.pooptime.df %>% 
+  mutate(event = if_else(time == 86400 , 0, 1)) 
+
+head(Long.pooptime.df)
+```
+
+Now we can start modeling the data. We'll start with the first poop; need to filter the data set by poop == "1"; Also lets add a variable named "group" for the Pollen diet and Infection treatment inetraction. This will make things a lot easier when it comes to the time-to-event models that have a difficult time with interaction terms. 
+```{r}
+# First lets create the group term
+Long.pooptime.df$group <- factor(paste0(Long.pooptime.df$InfectionTrt, Long.pooptime.df$PollenDiet))
+
+# Now filter by poop 1
+Poop1.df <- Long.pooptime.df %>% 
+  filter(poop == "1")
+```
+
+Lets re-level the factors of group, PollenDiet and InfectionTrt so that we are comparing to H or W or HW. 
+```{r}
+# Make HW first
+Poop1.df$group <- relevel(Poop1.df$group, "HW")
+levels(Poop1.df$group)
+
+Poop1.df$PollenDiet <- relevel(Poop1.df$PollenDiet, "W")
+#levels(Poop1.df$PollenDiet) 
+
+Poop1.df$InfectionTrt <- relevel(Poop1.df$InfectionTrt, "H")
+#levels(Poop1.df$InfectionTrt)
+```
+
+Ok, now let's start modeling the time until observation of poop no. 1. We are going to use cox proportional hazards models to do so. First we are going to assess the covariates. To apply the univariate coxph function to multiple covariates at once, type the code in the chunk below. This will automatically fit a univariate coxph model for each of the covariates and generate a table of results. We can use this to assess the importance of each covariate and decide if we want them in the model or not. 
+```{r}
+covariates <- c("PollenDiet", "InfectionTrt", "Parasite.load", "PollenConsump", "NectarConsump", "WingSize")
+univ_formulas <- sapply(covariates,
+                        function(x) as.formula(paste('Surv(time, event)~', x)))
+                        
+univ_models <- lapply( univ_formulas, function(x){coxph(x, data = Poop1.df)})
+# Extract data 
+univ_results <- lapply(univ_models,
+                       function(x){ 
+                          x <- summary(x)
+                          p.value<-signif(x$wald["pvalue"], digits=2)
+                          wald.test<-signif(x$wald["test"], digits=2)
+                          beta<-signif(x$coef[1], digits=2);#coeficient beta
+                          HR <-signif(x$coef[2], digits=2);#exp(beta)
+                          HR.confint.lower <- signif(x$conf.int[,"lower .95"], 2)
+                          HR.confint.upper <- signif(x$conf.int[,"upper .95"],2)
+                          HR <- paste0(HR, " (", 
+                                       HR.confint.lower, "-", HR.confint.upper, ")")
+                          res<-c(beta, HR, wald.test, p.value)
+                          names(res)<-c("beta", "HR (95% CI for HR)", "wald.test", 
+                                        "p.value")
+                          return(res)
+                          #return(exp(cbind(coef(x),confint(x))))
+                         })
+
+res <- t(as.data.frame(univ_results, check.names = FALSE))
+as.data.frame(res)
+```
+The output above shows the regression beta coefficients, the effect sizes (given as hazard ratios) and statistical significance for each of the variables in relation to overall probability of observing a poop event. Rememebr, each factor is assessed through separate univariate Cox regressions. From the output above, we can see that none of the variables are statistically significant by themselves. We need to decide whether or not to include the covariates moving forward. For now, let's see how they jointly impact prob of bee poop. 
+
+#Multivariate Cox regression analysis
+
+I'm going to run a series of models and determine which one is the best fit before looking at the summary and Anova
+```{r, warning=FALSE}
+
+coxme.poop1.mod1 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) + (1|Microcolony/MotherColony), data=Poop1.df)
+
+coxme.poop1.mod2 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) , data=Poop1.df)
+
+coxme.poop1.mod3 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Round) , data=Poop1.df)
+
+coxme.poop1.mod4 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony) , data=Poop1.df)
+
+coxme.poop1.mod5 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|MotherColony) , data=Poop1.df)
+
+coxph.poop1.mod <- coxph(Surv(time,event) ~ group + PollenConsump + NectarConsump , data=Poop1.df)
+
+AIC(coxph.poop1.mod, coxme.poop1.mod5, coxme.poop1.mod4, coxme.poop1.mod3, coxme.poop1.mod2, coxme.poop1.mod1)
+
+```
+
+
+
+The best fit moel based on AIC was the coxme with Round as the random effect
+```{r}
+Anova(coxme.poop1.mod3)
+```
+
+```{r}
+
+coxme.poop1.mod3_2 <- coxme(Surv(time,event) ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump  +   (1|Round) , data=Poop1.df)
+Anova(coxme.poop1.mod3_2)
+
+```
+
+```{r}
+summary(coxme.poop1.mod3)
+```
+
+
+```{r}
+res <- pairwise_survdiff(Surv(time,event) ~ group, data=Poop1.df)
+res
+
+```
+
+We can use another Coxph model with group as the only predictor to further investigate the effect of group and for plotting. 
+```{r}
+poop1.cox <- coxph(Surv(time, event) ~ group, data =  Poop1.df)
+```
+
+We can visualize the hazard ratios for each treatment using the ggforest function and the coxph model we just made with group. Note that HW is our refence level and hazard ratios are always relative to a reference level. 
+```{r}
+ggforest(poop1.cox, data = Poop1.df)
+```
+
+
+Intrepretation of the coxph hazard ratios...
+
+This can be a bit complicated because we have a factor with more than 2 levels (i.e., HW, HS, IW and IS). The hazard ratios are always relative to a reference level. Ultimately we are going to use HW as our referecne level since that represents un-infected (healthy) bees that consume the control (non-medicinal) pollen diet. Lets first call the summary for that model and interpret it before re-fitting the models with different reference levels for comparison.
+
+The p-value for all three of the overall model tests is < 0.05, indicating that the model is significant. These tests evaluate the null hypothesis that all of the betas (coef) are 0. 
+
+What we are realliy interest in are the hazard ratios, which is the exp(coef) in the summary above. With HW as a reference level, the HR of HS is 2.3911 and is significnat p = 0.0032. This means there's a significant increase in the probability of observing a red-dyed poop when healthy un-infected bees are fed sunflower pollen. Infection also increased the probability of observing a red-dyed poop (i.e IW hazard ratio = 1.6802 comapred to HW), but that effect was only marginally significant (p = 0.075). Suprisingly, there was no difference in the hazard ratio for IS bees compared to HW bees (p = 0.5219). But, as we will see below, theres a significnat difference between IS and HS when we set either of those as the reference levels.
+
+Now, lets make HS the reference level and re-run the model (reuslts below). Now we see that both HS and IW have significnatly different HRs compared to IS. In fact the HRs of both HS and IW are positive (2.221 and 2.658, respectively), suggesting that the probabiluty of observing a red-dyed poop for HS and IW bees is increased compared to IS bees. 
+```{r}
+# HS
+Poop1.df$group2 <- relevel(Poop1.df$group, "HS")
+#summary(coxph(Surv(time, event) ~ group2, data =  Poop1.df))
+#Anova(coxph(Surv(time, event) ~ group2, data =  Poop1.df)) #p-value stays the same as expected
+ggforest(coxph(Surv(time, event) ~ group2, data =  Poop1.df), data = Poop1.df)
+```
+The hazrad ratios of HW and IS significantly decreased compared to HS (p = 0.003 and 0.019, respectively). Thus, based on the analysis of time until the observation of the first red-dyed feces, sunflower pollen increases gut transit time in bees, but only if un-infected. 
+
+
+Let's visuallize the survival curve for poop 1. 
+```{r}
+
+custom_theme <- function() {
+  theme_survminer() %+replace%
+    theme(
+      plot.title=element_text(hjust=0.5)
+    )
+}
+
+
+
+
+fit <- survfit(Surv(time, event) ~ group, data = Poop1.df)
+
+# Create new variable for minutes 
+fit$time_min <- fit$time/60
+fit$time_hour <- fit$time_min/60
+
+timetoevent.poop1 <-  ggsurvplot(fit, legend.labs = c("CW", "CS", "IS", "IW"),
+                                 xscale = 3600,
+                                 xlab="Time (hour)",
+                                 ylab="Prob. of NO excretion",
+                                 legend.title = "Treatments",
+                                 legend = c(0.8, 0.7),
+                                 xlim = c(0, 46800),
+                                 axes.offset = FALSE,
+                                 break.x.by = 3600,
+                                 censor = FALSE,
+                                 #censor.shape = c(),
+                                 #censor.size = 3,
+                                 palette= c("darkgreen", "orange", "red", "black"),
+                                 linetype = c("solid", "solid", "dotted", "dotted"),
+                                 font.x = c(14, "black"),
+                                 font.y = c(14, "black"),
+                                 font.tickslab = c(11, "plain", "black"),
+                                 font.legend =c(14, "black"),
+                                 #title = "Observation of 1st red-dyed excretion",
+                                 ggtheme=custom_theme())
+timetoevent.poop1
+```
+
+
+
+
+
+##############################################
+# Poop 2
+
+Now we need to filer the data set by poop ==2
+```{r}
+poop2.df <- Long.pooptime.df %>% 
+  filter(poop == "2")
+```
+
+```{r}
+# Make HW first
+poop2.df$group <- relevel(poop2.df$group, "HW")
+levels(poop2.df$group)
+
+poop2.df$PollenDiet <- relevel(poop2.df$PollenDiet, "W")
+#levels(Poop1.df$PollenDiet) 
+
+poop2.df$InfectionTrt <- relevel(poop2.df$InfectionTrt, "H")
+#levels(Poop1.df$InfectionTrt)
+```
+
+```{r, warning=FALSE}
+coxme.poop2.mod1 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) + (1|Microcolony/MotherColony), data=poop2.df)
+
+coxme.poop2.mod2 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) , data=poop2.df)
+
+coxme.poop2.mod3 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Round) , data=poop2.df)
+
+coxme.poop2.mod4 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony) , data=poop2.df)
+
+coxme.poop2.mod5 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|MotherColony) , data=poop2.df)
+
+coxph.poop2.mod <- coxph(Surv(time,event) ~ group + PollenConsump + NectarConsump , data=poop2.df)
+
+AIC(coxph.poop2.mod, coxme.poop2.mod5, coxme.poop2.mod4, coxme.poop2.mod3, coxme.poop2.mod2, coxme.poop2.mod1)
+```
+Again, all of the models that vary in random effect terms are the same.
+
+```{r}
+Anova(coxme.poop2.mod3)
+```
+Marginal effect by PollenDiet and Infection Trt intercation (P = 0.03523) on the probability of observing the second red-dyed poop thorughout the 13 hour period. 
+
+```{r}
+summary(coxme.poop2.mod3)
+```
+
+
+```{r}
+
+coxme.poop2.mod3_2 <- coxme(Surv(time,event) ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump  +   (1|Round) , data=poop2.df)
+Anova(coxme.poop2.mod3_2)
+
+```
+We can use another Coxph model with group as the only predictor to further investigate the effect of group and for plotting. 
+```{r}
+poop2.cox <- coxph(Surv(time, event) ~ group, data =  poop2.df)
+```
+
+We can visualize the hazard ratios for each treatment using the ggforest function and the coxph model we just made with group. Note that HW is our refence level and hazard ratios are always relative to a reference level. 
+```{r}
+ggforest(poop2.cox, data = poop2.df)
+```
+
+
+
+
+```{r}
+
+fit2 <- survfit(Surv(time, event) ~ group, data = poop2.df)
+
+timetoevent.poop2 <-  ggsurvplot(fit2, legend.labs = levels(poop2.df$group),
+           xlab="Time (sec)",
+           ylab="Prob. of NO excretion",
+           legend.title = "Treatments",
+           xlim = c(0, 55000),
+           axes.offset = FALSE,
+           break.x.by = 10000,
+           censor = FALSE,
+           #censor.shape = c(),
+           #censor.size = 3,
+           palette= c( "darkgreen", "orange", "red", "black"),
+           linetype = c("solid", "solid", "dotted", "dotted"),
+           font.main = c(16, "bold", "black"),
+           font.x = c(14, "bold", "black"),
+           font.y = c(14, "bold", "black"),
+           font.tickslab = c(11, "plain", "black"),
+           font.legend =c(12, "bold", "black"),
+           title = "Observation of 2nd red-dyed excretion",
+           ggtheme=custom_theme())
+timetoevent.poop2
+```
+##############################################
+# Poop 3
+
+Now we need to filer the data set by poop ==1
+```{r}
+poop3.df <- Long.pooptime.df %>% 
+  filter(poop == "3")
+```
+
+```{r}
+# Make HW first
+poop3.df$group <- relevel(poop3.df$group, "HW")
+levels(poop3.df$group)
+
+poop3.df$PollenDiet <- relevel(poop3.df$PollenDiet, "W")
+#levels(Poop1.df$PollenDiet) 
+
+poop3.df$InfectionTrt <- relevel(poop3.df$InfectionTrt, "H")
+#levels(Poop1.df$InfectionTrt)
+```
+
+```{r, warning=FALSE}
+coxme.poop3.mod1 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) + (1|Microcolony/MotherColony), data=poop3.df)
+
+coxme.poop3.mod2 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) , data=poop3.df)
+
+coxme.poop3.mod3 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Round) , data=poop3.df)
+
+coxme.poop3.mod4 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony) , data=poop3.df)
+
+coxme.poop3.mod5 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|MotherColony) , data=poop3.df)
+
+coxph.poop3.mod <- coxph(Surv(time,event) ~ group + PollenConsump + NectarConsump , data=poop3.df)
+
+AIC(coxph.poop3.mod, coxme.poop3.mod5, coxme.poop3.mod4, coxme.poop3.mod3, coxme.poop3.mod2, coxme.poop3.mod1)
+```
+Not surprisingly, the models are the same again. So we will assess the full model.
+
+
+```{r}
+Anova(coxme.poop3.mod3)
+```
+
+```{r}
+summary(coxme.poop3.mod3)
+```
+
+```{r}
+coxme.poop3.mod3_2 <- coxme(Surv(time,event) ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump  +   (1|Round) , data=poop3.df)
+
+Anova(coxme.poop3.mod3)
+```
+
+We can use another Coxph model with group as the only predictor to further investigate the effect of group and for plotting. 
+```{r}
+poop3.cox <- coxph(Surv(time, event) ~ group, data =  poop3.df)
+anova(poop3.cox)
+```
+
+We can visualize the hazard ratios for each treatment using the ggforest function and the coxph model we just made with group. Note that HW is our refence level and hazard ratios are always relative to a reference level. 
+```{r}
+ggforest(poop3.cox, data = poop3.df)
+```
+
+
+```{r}
+
+fit3 <- survfit(Surv(time, event) ~ group, data = poop3.df)
+
+timetoevent.poop3 <-  ggsurvplot(fit3, legend.labs = levels(poop3.df$group),
+           xlab="Time (sec)",
+           ylab="Prob. of NO excretion",
+           legend.title = "Treatments",
+           xlim = c(0, 55000),
+           axes.offset = FALSE,
+           break.x.by = 10000,
+           censor = FALSE,
+           #censor.shape = c(),
+           #censor.size = 3,
+           palette= c( "darkgreen","orange", "red", "black"),
+           linetype = c("solid", "solid", "dotted", "dotted"),
+           font.main = c(16, "bold", "black"),
+           font.x = c(14, "bold", "black"),
+           font.y = c(14, "bold", "black"),
+           font.tickslab = c(11, "plain", "black"),
+           font.legend =c(12, "bold", "black"),
+           title = "Observation of 3rd red-dyed excretion",
+           ggtheme=custom_theme())
+timetoevent.poop3
+```
+##############################################
+# Poop 4
+
+Now we need to filer the data set by poop ==1
+```{r}
+poop4.df <- Long.pooptime.df %>% 
+  filter(poop == "4")
+```
+
+
+```{r}
+# Make HW first
+poop4.df$group <- relevel(poop4.df$group, "HW")
+levels(poop4.df$group)
+
+poop4.df$PollenDiet <- relevel(poop4.df$PollenDiet, "W")
+#levels(poop1.df$PollenDiet) 
+
+poop4.df$InfectionTrt <- relevel(poop4.df$InfectionTrt, "H")
+#levels(poop1.df$InfectionTrt)
+```
+
+```{r, warning=FALSE}
+
+coxme.poop4.mod1 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) + (1|Microcolony/MotherColony), data=poop4.df)
+
+coxme.poop4.mod2 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) , data=poop4.df)
+
+coxme.poop4.mod3 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Round) , data=poop4.df)
+
+coxme.poop4.mod4 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony) , data=poop4.df)
+
+coxme.poop4.mod5 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|MotherColony) , data=poop4.df)
+
+coxph.poop4.mod <- coxph(Surv(time,event) ~ group + PollenConsump + NectarConsump , data=poop4.df)
+
+AIC(coxph.poop4.mod, coxme.poop4.mod5, coxme.poop4.mod4, coxme.poop4.mod3, coxme.poop4.mod2, coxme.poop4.mod1)
+```
+Not surprisingly, the models are the same again. So we will assess the full model.
+
+```{r}
+Anova(coxme.poop4.mod3)
+```
+Parasite.load had a significant effect (p = 0.05596)  on the probability of observing the fourth red-dyed poop. 
+
+```{r}
+summary(coxme.poop4.mod3)
+```
+
+```{r}
+
+coxme.poop4.mod3_2 <- coxme(Surv(time,event) ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump  +   (1|Round) , data=poop4.df)
+
+Anova(coxme.poop4.mod3_2)
+```
+
+```{r}
+
+fit4 <- survfit(Surv(time, event) ~ group, data = poop4.df)
+
+timetoevent.poop4 <-  ggsurvplot(fit4, legend.labs = levels(poop4.df$group),
+           xlab="Time (sec)",
+           ylab="Prob. of NO excretion",
+           legend.title = "Treatments",
+           xlim = c(0, 55000),
+           axes.offset = FALSE,
+           break.x.by = 10000,
+           censor = FALSE,
+           #censor.shape = c(),
+           #censor.size = 3,
+           palette= c( "darkgreen","orange", "red", "black"),
+           linetype = c("solid", "solid", "dotted", "dotted"),
+           font.main = c(16, "bold", "black"),
+           font.x = c(14, "bold", "black"),
+           font.y = c(14, "bold", "black"),
+           font.tickslab = c(11, "plain", "black"),
+           font.legend =c(12, "bold", "black"),
+           title = "Observation of 4th red-dyed excretion",
+           ggtheme=custom_theme())
+timetoevent.poop4
+```
+
+##############################################
+# Poop 5
+
+Now we need to filer the data set by poop ==5
+```{r}
+poop5.df <- Long.pooptime.df %>% 
+  filter(poop == "5")
+```
+
+
+```{r}
+# Make HW first
+poop5.df$group <- relevel(poop5.df$group, "HW")
+levels(poop5.df$group)
+
+poop5.df$PollenDiet <- relevel(poop5.df$PollenDiet, "W")
+#levels(poop1.df$PollenDiet) 
+
+poop5.df$InfectionTrt <- relevel(poop5.df$InfectionTrt, "H")
+#levels(poop1.df$InfectionTrt)
+```
+
+```{r, warning=FALSE}
+coxme.poop5.mod1 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) + (1|Microcolony/MotherColony), data=poop5.df)
+
+coxme.poop5.mod2 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony/Round) , data=poop5.df)
+
+coxme.poop5.mod3 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Round) , data=poop5.df)
+
+coxme.poop5.mod4 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|Microcolony) , data=poop5.df)
+
+coxme.poop5.mod5 <- coxme(Surv(time,event) ~ group + PollenConsump + NectarConsump  +   (1|MotherColony) , data=poop5.df)
+
+coxph.poop5.mod <- coxph(Surv(time,event) ~ group + PollenConsump + NectarConsump , data=poop5.df)
+
+AIC(coxph.poop5.mod, coxme.poop5.mod5, coxme.poop5.mod4, coxme.poop5.mod3, coxme.poop5.mod2, coxme.poop5.mod1)
+```
+
+
+```{r}
+Anova(coxme.poop5.mod3)
+```
+
+
+```{r}
+summary(coxme.poop5.mod3)
+```
+The hazard ratio for nectar consumption for the fifth poop (HR = 7.0717287). Interestingly we see an HR of 0.9833542 for parasite load, suggesting that there's a decrease in the probability of observing the fifth red-dyed poop by ~ 1.7 % for each unit change change in parasite load (count). Comparing bees with a zero parasite count to bees with a 100 count we see an approximately 170% decrease in the probability of observing a red-dyed poop during the period of the experiment. In other words, infection may have a denisity dependent negative effect on gut transit time when looking at the time it takes for the first five poops. 
+
+```{r}
+
+coxme.poop5.mod3_2 <- coxme(Surv(time,event) ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump  +   (1|Round) , data=poop5.df)
+Anova(coxme.poop5.mod3_2)
+
+```
+
+```{r}
+
+fit5 <- survfit(Surv(time, event) ~ group, data = poop5.df)
+
+timetoevent.poop5 <-  ggsurvplot(fit5, legend.labs = levels(poop5.df$group),
+           xlab="Time (sec)",
+           ylab="Prob. of NO excretion",
+           legend.title = "Treatments",
+           xlim = c(0, 55000),
+           axes.offset = FALSE,
+           break.x.by = 10000,
+           censor = FALSE,
+           #censor.shape = c(),
+           #censor.size = 3,
+           palette= c( "darkgreen","orange", "red", "black"),
+           linetype = c("solid", "solid", "dotted", "dotted"),
+           font.main = c(16, "bold", "black"),
+           font.x = c(14, "bold", "black"),
+           font.y = c(14, "bold", "black"),
+           font.tickslab = c(11, "plain", "black"),
+           font.legend =c(12, "bold", "black"),
+           title = "Observation of 5th red-dyed excretion",
+           ggtheme=custom_theme())
+timetoevent.poop5
+```
+
+
+
+
+
+
+#########################################################################################################################
+#########################################################################################################################
+#########################################################################################################################
+
+
+
+## Crithidia infection intensity and gut tranist time
+
+# poop 1
+```{r}
+Poop1.df_intensity <- Poop1.df %>% 
+  filter(InfectionTrt == "I")
+
+coxme.poop1.intensity <- coxme(Surv(time,event) ~ PollenDiet*Parasite.load  + PollenConsump + NectarConsump +  (1|Round), data=Poop1.df_intensity)
+
+summary(coxme.poop1.intensity)
+```
+Parasite.load (0.004309715) is the effect of each unit increase on the log hazard rate when PollenDiet is Wildflower. For sunflower pollen, we need to add on the effect of PollenDietS:Parasite.load (-0.008697319), which would be -0.004387604 So the effect of parasite load on "survival" less pronounced in this model for sun compared to wild. Or in other words, the probability of not observing the second red-dyed excretion decreases with each unit increase of parasite load in Sun bees comapred to wild bees
+
+If you do want the interaction term on the odds ratio scale, then just exponentiate the interaction coefficient to get a ratio. In this example, we get a ratio of 0.9913 This is the ratio by which the the odds ratios change when going from (in this example) Wild to Sun. What does this mean? The HR for each unit increase in parasite load in Wild is exp(0.004309715) = 1.004319 The HR for each unit increase in Sun is exp(1.004319-0.008697319) = 2.706406. The ratio of ratios = 2.706406/1.004319 = 2.694767, the natural log of which = 0.9913117
+
+
+```{r}
+Anova(coxme.poop1.intensity)
+```
+
+# poop 2
+```{r}
+Poop2.df_intensity <- poop2.df %>% 
+  filter(InfectionTrt == "I")
+
+coxme.poop2.mod1.b2_intensity <- coxme(Surv(time,event) ~ PollenDiet*Parasite.load  + PollenConsump + NectarConsump +  (1|Round), data=Poop2.df_intensity)
+summary(coxme.poop2.mod1.b2_intensity)
+```
+Parasite.load (0.007189666) is the effect of each unit increase on the log hazard rate when PollenDiet is Wildflower. For sunflower pollen, we need to add on the effect of PollenDietS:Parasite.load (-0.013571640), which would be -0.006381974. So the effect of parasite load on "survival" less pronounced in this model for sun compared to wild. Or in other words, the probability of not observing the second red-dyed excretion decreases with each unit increase of parasite load in Sun bees comapred to wild bees
+
+If you do want the interaction term on the odds ratio scale, then just exponentiate the interaction coefficient to get a ratio. In this example, we get a ratio of 0.9865 This is the ratio by which the the odds ratios change when going from (in this example) Wild to Sun. What does this mean? The HR for each unit increase in parasite load in Wild is exp(0.007189666) = 1.007216 The HR for each unit increase in Sun is exp(1.007216-0.013571640) = 2.70106. The ratio of ratios = 2.70106/1.007216 = 2.681709, the natural log of which = 0.9864543
+
+```{r}
+Anova(coxme.poop2.mod1.b2_intensity)
+```
+
+# poop 3
+```{r}
+Poop3.df_intensity <- poop3.df %>% 
+  filter(InfectionTrt == "I")
+
+coxme.poop3.mod1.b2_intensity <- coxme(Surv(time,event) ~ PollenDiet*Parasite.load  + PollenConsump + NectarConsump +  (1|Round), data=Poop3.df_intensity)
+summary(coxme.poop3.mod1.b2_intensity)
+```
+
+Parasite.load (0.006086873) is the effect of each unit increase on the log hazard rate when PollenDiet is Wildflower. For sunflower pollen, we need to add on the effect of PollenDietS:Parasite.load (-0.018273321), which would be -0.01218645. So the effect of parasite load is less pronounced in this model for sun compared to wild.
+
+If you do want the interaction term on the odds ratio scale, then just exponentiate the interaction coefficient to get a ratio. In this example, we get a ratio of XXX. This is the ratio by which the the odds ratios change when going from (in this example) Wild to Sun. What does this mean? The HR for each unit increase in parasite load in Wild is exp(0.006086873) = 1.006105 The HR for each unit increase in Sun is exp(1.006105-0.018273321) = 2.685405. The ratio of ratios = 2.685405/1.006105 = 2.66911, the natural log of which = 0.9817451.
+
+
+
+```{r}
+Anova(coxme.poop3.mod1.b2_intensity)
+```
+
+# poop 4
+```{r}
+Poop4.df_intensity <- poop4.df %>% 
+  filter(InfectionTrt == "I")
+
+coxme.poop4.mod1.b2_intensity <- coxme(Surv(time,event) ~ PollenDiet*Parasite.load  + PollenConsump + NectarConsump +  (1|Round), data=Poop4.df_intensity)
+summary(coxme.poop4.mod1.b2_intensity)
+```
+
+```{r}
+Anova(coxme.poop4.mod1.b2_intensity)
+```
+
+# poop 5
+```{r}
+Poop5.df_intensity <- poop5.df %>% 
+  filter(InfectionTrt == "I")
+
+coxme.poop5.mod1.b2_intensity <- coxme(Surv(time,event) ~ PollenDiet*Parasite.load  + PollenConsump + NectarConsump +  (1|Round), data=Poop5.df_intensity)
+summary(coxme.poop5.mod1.b2_intensity)
+```
+
+```{r}
+Anova(coxme.poop5.mod1.b2_intensity)
+```
+
+
+
+################################################################################################ 
+# Poop rate (i.e., Poops/hour) Analysis
+################################################################################################         
+
+Ok, lets switch gears and analyze poop rate as an estimate from counting the number of poops at two hour intervals. Like we did with the time-to-event analysis, we first need to do a little restructuring of the data set.
+```{r}
+str(twohourintervals.noEggs.noDead.df)
+```
+
+```{r}
+#Rename for simplicity
+
+pooprate.df <- twohourintervals.noEggs.noDead.df
+
+```
+We are going to use the hourly counts to create a linear model for each bee and from that extract the value of the slope for each bee. The slope will represent the rate of bee poops (poops/2hours). We should fix the intercept of that line to pass through the origin because all bees start off with a zero poop count. It doesnt make biological sense for a bee to have negative poops before the observations even begin. 
+```{r}
+
+# The deisgn matrix is coded so that the intercept is zero
+design.mat <- cbind(1,3:9)
+response.mat <- t(pooprate.df[,3:9])
+
+reg <- lm.fit(design.mat, response.mat)$coefficients
+pooprate.df <- cbind(pooprate.df, t(reg))
+
+pooprate.df <- pooprate.df %>% 
+  rename(intercept = x1, slope = x2)
+
+str(pooprate.df$slope)
+```
+
+```{r}
+library(car)
+library(MASS)
+qqp(pooprate.df$slope, "norm")
+### Huge left skewed tail
+qqp(pooprate.df$slope, "lnorm")
+### Meh
+
+library("ggpubr")
+ggdensity(pooprate.df$slope, 
+          main = "Density plot of slope",
+          xlab = "Slope")
+
+shapiro.test(pooprate.df$slope)
+
+```
+From the output, the p-value < 0.0001 implying that the distribution of the data are significantly different from normal distribution. In other words, we cannot assume the normality. Also, from the density plot we see that we have highly positively skewed data, which typically fits a Gamma distribution. We will need a generalized linear mixed effects model to account for both the gamma distribution of our response variable and the nested random effects of Microcolony, Round and MotherColony. My favorite package for GLMMs in R has been glmmTMB, so lets try that first. 
+
+We should scale and center our continuous predictors.
+```{r}
+# Lets rescale the continuous variables so they are all on the same scale. This is advise by lme4 for the glmer's below. 
+pooprate.df$parasite.load.scaled <- scale(pooprate.df$Parasite.load)
+pooprate.df$NectarConsump.scaled <- scale(pooprate.df$NectarConsump)
+pooprate.df$PollenConsump.scaled <- scale(pooprate.df$PollenConsump)
+
+# Also, we need to add small noise to the zero slope values in order to fit a gamma distribution. This is standard practice and makes sense for our data set because a zero represents a bee with a really slow poop rate. It's safe to assume that at some point that bee would have pooped and thus would no longer have a slope of zero. 
+pooprate.df <- pooprate.df %>% 
+  mutate(slope2 = slope + 0.00000001)
+
+
+shapiro.test(pooprate.df$slope2)
+```
+
+
+#Testing significance of random effects
+
+Per Ben Bolker, the most common way to do this is to use a likelihood ratio test, i.e. fit the full and reduced models. As we can see below, the random effects are not important for our model. None of the random effect variations differ from the full model and the glm with no random effects had a lower AIC score (dAIC > 2) than all other models. So, we will fit a GLM model for poop rate (slope2) excluding random effect terms.
+```{r}
+rate.mod.full <- glmer(slope2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled  +  (1|Microcolony/Round) + (1|Microcolony:MotherColony), family = Gamma(link = "inverse"),  pooprate.df)
+
+rate.mod.reduced.1 <- glmer(slope2 ~  PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled  + (1|Microcolony/Round) , family = Gamma(link = "inverse"),  pooprate.df)
+
+rate.mod.reduced.2 <- glmer(slope2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled  + (1|Microcolony:MotherColony) , family = Gamma(link = "inverse"),  pooprate.df)
+
+rate.mod.reduced.3 <- glmer(slope2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled  + (1|Microcolony) , family = Gamma(link = "inverse"),  pooprate.df)
+
+rate.mod.reduced.4 <- glmer(slope2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled  + (1|Round) , family = Gamma(link = "inverse"),  pooprate.df)
+
+rate.mod.reduced.5 <- glm(slope2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled, family = Gamma(link = "inverse"),  pooprate.df)
+
+anova(rate.mod.full,rate.mod.reduced.1, rate.mod.reduced.2, rate.mod.reduced.3, rate.mod.reduced.4, rate.mod.reduced.5)
+
+AIC(rate.mod.reduced.5, rate.mod.reduced.4)
+```
+
+Here is our GLM model for poop rate (slope2) excluding random effect terms. The summary suggests a negative effect of parasite load on the rate. The beta coefficient is 0.013 +/- 0.007 (mean +/- SE), which can be interpreted as a 1.3% decrease in rate per each unit change in parasite load. In other words, a 130% decrease in rate between bees that have a zero count (i.e., no infection) and bees with a relatively high infecton load of 100 cells per 0.02 uL of sample. This finding coincides well with our results for the time-to-event anlaysis of poop number five, in which parasite load was significantly associated with a decrease in the probability of observing a red-dyed poop during the period of the experiment. Taken together, our results suggest that Crithidia infection increases gut transit time, but there is a density dependent relationship in which greater infection intensity has the reverse effect of decreasing gut transity time. 
+```{r}
+rate.mod.final <- glm(slope2 ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump, family = Gamma(link = "inverse"),  pooprate.df)
+
+summary(rate.mod.final)
+```
+Lets call the Analysis of Deviance Table for the model. We see below that both parasite load and infection treatment have significant effects of gut transit time (i.e. poop rate), but not the intercation term, pollen diet, nor consumption.
+```{r}
+Anova(rate.mod.final)
+```
+
+Let's make a plot to visualize the modeled mean slopes for the pollen diets and infection treatments. This will give us the estimated marginal mean rates (aka model adjusted means) for pollen diet and infection treatment. 
+```{r}
+pooprate.emmeans.df <- as.data.frame(emmeans(rate.mod.final, ~ PollenDiet * InfectionTrt, type = "response"))
+pooprate.emmeans.df
+```
+
+
+```{r}
+Colors <- c("blue", "red", "blue", "red")
+Infection.names<-c("Un-infected", "Infected")
+pollen.axis<-c( "Sunflower", "Wildflower")
+
+pooprate.infectiontrt <- ggplot(pooprate.emmeans.df, aes(fill=InfectionTrt, y=response, x=PollenDiet)) + 
+  geom_bar(position=position_dodge(),stat="identity", colour="black" ) + 
+  geom_errorbar(aes(ymin=response - SE, ymax=response + SE),
+                size=1, width=0.2,  # Width of the error bars
+                position=position_dodge(0.9)) + 
+  theme_classic() + 
+  scale_fill_manual(values = Colors, labels = Infection.names) +
+  ylab("Excretion rate (events/2 hr)") + 
+  xlab("Pollen Diet") + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme(text = element_text(size = 20, face="bold"))
+pooprate.infectiontrt
+
+```
+
+We may want a plot that only inlcudes infection treatment. We can see that infection treatment almost doubled the rate!!!
+```{r}
+pooprate.emmeans.infectiononly.df <- as.data.frame(emmeans(rate.mod.final, ~ InfectionTrt, type = "response"))
+pooprate.emmeans.infectiononly.df
+
+```
+
+And now the plot...
+```{r}
+Colors2 <- c("blue", "red")
+Infection.names<-c("Un-infected", "Infected")
+
+
+pooprate.infectiontrt2 <- ggplot(pooprate.emmeans.infectiononly.df, aes(y=response, x=InfectionTrt)) + 
+  geom_bar(position=position_dodge(), stat="identity", width = 0.65,size = 1, fill=Colors2, color = "black") + 
+  geom_errorbar(aes(ymin=response - SE, ymax=response + SE),
+                size=1, width=0.3,  # Width of the error bars
+                position=position_dodge(0.9)) + 
+  theme_classic() + 
+  scale_x_discrete(labels=c("H" = "Control", "I" = "Infected")) + 
+  ylab(expression(~Excretion~rate~ "(events * 2"~hr^-1*")")) + 
+  xlab("Infection Treatment") + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_set(theme_classic() +
+             theme(
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(color="black",
+                                              size=15),
+                   axis.text.y = element_text(color="black",
+                                              size=15),
+                   legend.text = element_text(color="black",
+                                              size=15)))
+
+
+
+pooprate.infectiontrt2
+```
+
+```{r}
+
+ggsave("Vid_Analyses/pooprate.infectiontrtonly.pdf", pooprate.infectiontrt2, width = 6, height = 5 )
+```
+
+## Let's analyze the relatioship between excretion rate and infection intensity by pollen diet.
+
+```{r}
+
+#Subset data by infection status (i/e only inlcude bees incluated with Crithidia)
+
+pooprate.df_infectedonly <- pooprate.df %>% 
+  filter(InfectionTrt == "I")
+
+rate.mod.final_intensity <- glm(slope2 ~ PollenDiet*Parasite.load + PollenConsump + NectarConsump , family = Gamma(link = "inverse"),  pooprate.df_infectedonly)
+
+summary(rate.mod.final_intensity)
+```
+
+```{r}
+
+Anova(rate.mod.final_intensity)
+```
+
+```{r}
+rate.mod.final_intensity2 <- glm(slope2 ~ Parasite.load + PollenConsump + NectarConsump, family = Gamma(link = "inverse"),  pooprate.df_infectedonly, na.action = na.exclude)
+
+summary(rate.mod.final_intensity2)
+```
+
+```{r}
+
+Anova(rate.mod.final_intensity2)
+```
+
+```{r}
+
+1/(1.040358 + 0.015596)
+#0.9470109
+
+#the predicted effect of parasite load is to decrease the mean excretion rate to 1/(1.040358+0.015596) = 0.9470109 poops/2hr
+
+((1/1.040358) - 0.9470109) * 100 
+# 1.419668
+
+1.419668 * 10
+
+```
+
+```{r}
+rate.mod.final_intensity3 <- glm(slope2 ~ Parasite.load, family = Gamma(link = "log"),  pooprate.df_infectedonly)
+
+summary(rate.mod.final_intensity3)
+```
+
+or we can use the predict function to extract model adjusted estimates and plot SE-based error bands
+```{r}
+
+
+preds_rate<-predict(rate.mod.final_intensity3, type = "response", se.fit = TRUE)
+
+pooprate.df_infectedonly$fit <- preds_rate$fit
+
+
+pooprate.df_infectedonly$SEfit <- preds_rate$se.fit
+
+pooprate.df_infectedonly$lwr <- pooprate.df_infectedonly$fit - pooprate.df_infectedonly$SEfit
+  
+pooprate.df_infectedonly$upr <- pooprate.df_infectedonly$fit + pooprate.df_infectedonly$SEfit
+
+
+Colors <- c("orange","black")
+Shapes <- c(21, 24)
+
+plot_rate_intensity <- ggplot(pooprate.df_infectedonly, aes(x=Parasite.load,
+                y=fit)) +
+  geom_smooth(se = TRUE, method = lm, level = 0.90, color = "black") +
+  #geom_ribbon(aes(ymin=lwr, ymax=upr), fill = "grey70", alpha = 0.3, linetype = 0) +
+  geom_point(aes(x=Parasite.load, y=slope2)) +
+  scale_y_continuous(expand = c(0,0), limits = c(-.5, 2))+
+  ylab(expression(~Excretion~rate~ "(events * 2"~hr^-1*")")) + 
+  xlab(expression(italic(Crithidia)~infection~intensity~ "(cells * 0.02"~mu~L^-1*")", sep="")) + 
+ theme_set(theme_classic() +
+             theme(legend.position = "top",
+                   text = element_text(size=12),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(color="black",
+                                              size=12),
+                   axis.text.y = element_text(color="black",
+                                              size=12),
+                   legend.text = element_text(color="black",
+                                              size=12)))
+
+
+plot_rate_intensity
+```
+
+```{r}
+ggsave("Vid_Analyses/plot_excretion_rate_intensity.pdf", plot_rate_intensity, width = 7, height = 5)
+
+```
+
+
+
+
+
+Save the three plots that we made in this anlaysis:
+```{r}
+# time-to-event plot for poop 1
+ggsave("Vid_Analyses/poop1.timetoevent.pdf",  print(timetoevent.poop1), width = 6, height = 5 )
+
+# time-to-event plot for poop 2
+ggsave("Vid_Analyses/poop2.timetoevent.pdf",  print(timetoevent.poop2), width = 6, height = 5 )
+
+# time-to-event plot for poop 3
+ggsave("Vid_Analyses/poop3.timetoevent.pdf",  print(timetoevent.poop3), width = 6, height = 5 )
+
+# time-to-event plot for poop 4
+ggsave("Vid_Analyses/poop4.timetoevent.pdf",  print(timetoevent.poop4), width = 6, height = 5 )
+
+# time-to-event plot for poop 5
+ggsave("Vid_Analyses/poop5.timetoevent.pdf",  print(timetoevent.poop5), width = 6, height = 5 )
+
+# poop rate vs infection treatment
+ggsave("Vid_Analyses/pooprate.infectiontrt.pdf", pooprate.infectiontrt, width = 6, height = 5 )
+
+# poop rate vs infection treatment (option 2; infection only)
+ggsave("Vid_Analyses/pooprate.infectiontrtonly.pdf", pooprate.infectiontrt2, width = 6, height = 5 )
+
+
+```
+
+
+This is super important for replication purposes. Often, packages get updated and some can become dpericated.
+```{r}
+sessionInfo()
+```

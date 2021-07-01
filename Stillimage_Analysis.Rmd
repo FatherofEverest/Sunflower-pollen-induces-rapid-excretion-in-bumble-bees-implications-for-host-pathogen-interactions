@@ -1,0 +1,964 @@
+---
+title: "Exp 18 Gut Transit Time - Still Image Analyses"
+author: "Jonathan J. Giacomini"
+date: "10/24/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+Libraries that we need...
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(glmmTMB)
+library(mgcv)
+library(tidyverse)
+library(ggplot2)
+library(bnpa)
+library(multcomp)
+library(MASS)
+library(lme4)
+```
+
+Set the working directory:
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Volumes/GoogleDrive/My Drive/POLLINATOR RESEARCH/PHD Work/Sunflower Pollen Experiments/Irwin Lab_Sunflower Pollen Experiments/Exp 18_Gut Transit Time")
+```
+
+
+Load the image processing data and the meta data:
+```{r}
+image_gtt.df <- read.csv("Still images/GTT Image processing.csv", header = TRUE)
+```
+
+Check the structures of those data frames:
+```{r}
+str(image_gtt.df)
+```
+
+Convert chr to factors for relevant variables:
+```{r}
+image_gtt.df$image <- as.factor(image_gtt.df$image)
+image_gtt.df$bee <- as.factor(image_gtt.df$bee)
+str(image_gtt.df)
+```
+
+
+
+```{r}
+meta_gtt.df <- read.csv("GTT_Exp18_MetaData.csv", header = TRUE)
+meta_gtt.df$Microcolony <- as.factor(meta_gtt.df$Microcolony)
+meta_gtt.df$MotherColony <- as.factor(meta_gtt.df$MotherColony)
+meta_gtt.df$BeeID <- as.factor(meta_gtt.df$BeeID)
+str(meta_gtt.df)
+```
+
+We need to merge the meta df with the image df.
+```{r}
+image_gtt.df <- image_gtt.df %>% 
+  full_join(x = image_gtt.df, y = meta_gtt.df, by = c("bee" = "BeeID")) 
+
+image_gtt.df$InfectionTrt <- as.factor(image_gtt.df$InfectionTrt)
+image_gtt.df$PollenDiet <- as.factor(image_gtt.df$PollenDiet)
+image_gtt.df$Round <- as.factor(image_gtt.df$Round)
+```
+
+Filter by Eggs and Deaths
+```{r}
+image_gtt.df.noDead.noEggs <- image_gtt.df %>% 
+  filter(Eggs != 1) %>% 
+  filter(Death != 1)
+```
+
+```{r}
+image_gtt.df.noDead.noEggs %>% 
+  group_by(PollenDiet, InfectionTrt) %>% 
+  summarise(n = n())
+```
+
+# No. of poops  
+          
+This is count data and likely doesnt fit a normal distribution. Lets start by assessing the distribution and settling on a the type of linear model to use. 
+```{r, message=FALSE, warning=FALSE}
+library(car)
+library(MASS)
+```
+
+```{r}
+qqp(image_gtt.df.noDead.noEggs$poop_count, "norm")
+```
+
+Not terrible... some skewing at the tails. Lets log transform the counts and see if that looks better
+```{r}
+qqp(image_gtt.df.noDead.noEggs$poop_count, "lnorm")
+### Meh
+```
+
+Ok, lets look at the density plot.
+```{r}
+library("ggpubr")
+ggdensity(image_gtt.df.noDead.noEggs$poop_count, 
+          main = "Density plot of poop count",
+          xlab = "Poop count")
+# Again, not bad. 
+```
+
+Shapiro Wilks test for normal distribution:
+```{r}
+shapiro.test(image_gtt.df.noDead.noEggs$poop_count)
+```
+
+Ok, the SW test suggests that the count data is not normally distributed and the density plot shows a skewed right tail. We should use a poisson or negative binomial distrubution. 
+
+Poisson distribution qq plot:
+```{r}
+poisson <- fitdistr(image_gtt.df.noDead.noEggs$poop_count, "Poisson")
+qqp(image_gtt.df.noDead.noEggs$poop_count, "pois", lambda = poisson$estimate)
+# Not bad
+```
+
+Negative Binomial distribution qq plot:
+```{r}
+nbinom <- fitdistr(image_gtt.df.noDead.noEggs$poop_count, "Negative Binomial")
+qqp(image_gtt.df.noDead.noEggs$poop_count, "nbinom", size = nbinom$estimate[[1]],mu = nbinom$estimate[[2]])
+#Little better than the poisson fit
+```
+
+Lets compare a Possion GLMM to a Neg Bin GLMM using Log-liklihood ratio tests and AIC:
+```{r}
+library(glmmTMB)
+
+pois.mod1 <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load +  (1|Microcolony/Round) + (1|Microcolony:MotherColony), family = poisson(link = "log"), data = image_gtt.df.noDead.noEggs, na.action = na.omit)
+  
+pois.mod2 <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt +  (1|Microcolony/Round) + (1|Microcolony:MotherColony), family = poisson(link = "log"), data = image_gtt.df.noDead.noEggs)
+  
+negbin.mod1 <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load +  (1|Microcolony/Round) + (1|Microcolony:MotherColony), family = "nbinom2", data = image_gtt.df.noDead.noEggs)
+
+negbin.mod2 <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + (1|Microcolony/Round) + (1|Microcolony:MotherColony), family = "nbinom2", data = image_gtt.df.noDead.noEggs)
+
+
+```
+
+The poisson model did not converge. Ben Bolker suggests that this likely occurs when a model is overparameterized (i.e. the data does not contain enough information to estimate the parameters reliably), when a random-effect variance is estimated to be zero, or random-effect terms are estimated to be perfectly correlated (“singular fit”: often caused by having too few levels of the random-effect grouping variable), when zero-inflation is estimated to be near zero (a strongly negative zero-inflation parameter), when dispersion is estimated to be near zero, or when complete separation occurs in a binomial model: some categories in the model contain proportions that are either all 0 or all 1. My guess is that the model is overparameterized. Fortunatelyt the negbin model worked fine.
+
+Lets compare a simpler poissson model to a simpler neg bin model with none of the covariates (i.e., not over parameterized)
+```{r}
+anova(negbin.mod2, pois.mod2)
+```
+The log-liklihood ratio test seuggests that theres a significnat difference in model fit between the two models. The lower AIC score of the neg bin model suggests that it provides a better fit. Based on this, I conclude that we shoud move forward with a negative binomial model.
+
+Now lets assess the significnace of the random effects:
+```{r}
+
+negbin.mod3 <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load +  (1|Microcolony/Round), family = "nbinom2", data = image_gtt.df.noDead.noEggs)
+
+negbin.mod4 <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load + (1|Microcolony/MotherColony), family = "nbinom2", data = image_gtt.df.noDead.noEggs)
+
+negbin.mod5 <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load +  (1|Microcolony), family = "nbinom2", data = image_gtt.df.noDead.noEggs)
+
+negbin.mod5b <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load +  (1|Round), family = "nbinom2", data = image_gtt.df.noDead.noEggs)
+
+negbin.mod5c <- glmmTMB(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load +  (1|MotherColony), family = "nbinom2", data = image_gtt.df.noDead.noEggs)
+
+negbin.mod6 <- glm.nb(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump + Parasite.load, data = image_gtt.df.noDead.noEggs)
+
+negbin.mod7 <- glm.nb(poop_count ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump , data = image_gtt.df.noDead.noEggs)
+
+negbin.mod8<- glm.nb(poop_count ~ PollenDiet*InfectionTrt + PollenConsump  + Parasite.load + WingSize, data = image_gtt.df.noDead.noEggs)
+
+
+
+AIC(negbin.mod6, negbin.mod5, negbin.mod5b, negbin.mod5c, negbin.mod3, negbin.mod4)
+```
+As we can see, the different variations of random effects do not change the model fit. In fact, a model with just microcolony as a random effect produces nearly the same exact results as the full model. 
+
+
+
+The best model inlcudes Nectar Consumptiopon and not Wing Size...Here's the summary of the final neg bin glm:
+
+```{r}
+summary(negbin.mod6)
+```
+
+And the significance of terms: 
+```{r}
+Anova(negbin.mod6)
+```
+We see a significnat effect of pollen diet on poop count based on the fully parameterized glmm.  Based on the beta coefficient for pollen diet (-0.582462) bees fed sunflower pollen pooped more than bees that were fed wildflower pollen by nearly double.
+
+Becky suggested that we run a model with parasite load excluded as a covariate in case infection trt and paraiste load are confounded. Here's that model and Anova output. As we can see there's not much of a change. Not enough to warrant exclusion in my opinion.
+```{r}
+Anova(negbin.mod7)
+```
+
+What about the relationship between infection intensity and poop count for sunflower fed bees? Does pooping more often reduce infection intensity?
+```{r}
+
+#Subset data by infection status (i/e only inlcude bees incluated with Crithidia)
+
+image_gtt.df.noDead.noEggs.infectedonly <- image_gtt.df.noDead.noEggs %>% 
+  filter(InfectionTrt == "I")
+
+
+
+negbin.mod_count_intensity_sun_1 <- glm.nb(poop_count ~ PollenDiet*Parasite.load + PollenConsump + NectarConsump , data = image_gtt.df.noDead.noEggs.infectedonly)
+
+summary(negbin.mod_count_intensity_sun_1)
+```
+
+```{r}
+
+Anova(negbin.mod_count_intensity_sun_1)
+```
+
+
+```{r}
+
+negbin.mod_count_intensity_sun_2 <- glm.nb(poop_count ~ PollenDiet*Parasite.load , data = image_gtt.df.noDead.noEggs.infectedonly)
+
+summary(negbin.mod_count_intensity_sun_2)
+```
+
+```{r}
+
+Anova(negbin.mod_count_intensity_sun_2)
+```
+
+
+```{r}
+AIC(negbin.mod_count_intensity_sun_2, negbin.mod_count_intensity_sun_1)
+
+```
+
+
+Let's plot the effect of pollen diet and infection intensity on poop count.
+```{r}
+
+Colors <- c("orange","darkgray")
+Shapes <- c(1, 20)
+
+plot_poop_count_intensity_pollendiet<- ggplot(image_gtt.df.noDead.noEggs.infectedonly,
+                         aes(x=Parasite.load,
+                             y=poop_count, color = PollenDiet)) +
+  geom_point() +
+  geom_smooth(se = TRUE, method = lm, level = 0.90) +
+  ylab(expression(bold("No. of excretion events"))) + 
+  xlab(expression(bold("Crithidia infection intensity (cells/0.02ml)"))) + 
+  scale_colour_manual(values = Colors, name = "Diet:", labels = c("Sun", "Wild")) +
+  scale_shape_manual(values = Shapes) +
+  theme_set(theme_classic() +
+             theme(text = element_text(size=20),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(face="bold",
+                                              color="black",
+                                              size=20),
+                   axis.text.y = element_text(face="bold",
+                                              color="black",
+                                              size=20),
+                   legend.text = element_text(face="bold",
+                                              color="black",
+                                              size=20),
+                   legend.position="top"))
+
+plot_poop_count_intensity_pollendiet
+```
+
+
+or we can use the predict function to extract model adjusted estimates and plot SE-based error bands
+```{r}
+
+
+
+
+
+
+image_gtt.df.noDead.noEggs.infectedonly$fit <- predict(negbin.mod_count_intensity_sun_2, type = "response")
+
+preds<-predict(negbin.mod_count_intensity_sun_2, type = "response", se.fit = TRUE)
+
+image_gtt.df.noDead.noEggs.infectedonly$SEfit <- preds$se.fit
+
+image_gtt.df.noDead.noEggs.infectedonly$lwr <- image_gtt.df.noDead.noEggs.infectedonly$fit - image_gtt.df.noDead.noEggs.infectedonly$SEfit
+  
+image_gtt.df.noDead.noEggs.infectedonly$upr <- image_gtt.df.noDead.noEggs.infectedonly$fit + image_gtt.df.noDead.noEggs.infectedonly$SEfit
+
+
+Colors <- c("orange","black")
+Shapes <- c(21, 24)
+
+plot_poop_count_intensity_pollendiet_2 <- ggplot(image_gtt.df.noDead.noEggs.infectedonly, aes(x=Parasite.load,
+                y=fit,
+                color = PollenDiet)) +
+  geom_line(aes(x=Parasite.load,
+                y=fit,
+                color = PollenDiet), size = 1) +
+  geom_ribbon(aes(ymin=lwr, ymax=upr), fill = "grey70", alpha = 0.3, linetype = 0) +
+  geom_point(aes(x=Parasite.load, y=poop_count, color = PollenDiet)) +
+  ylab("No. of excretion events") + 
+  xlab(expression(italic(Crithidia)~infection~intensity~ "(cells * 0.02"~mu~L^-1*")", sep="")) + 
+  scale_colour_manual(values = Colors, name = "Diet:", labels = c("Sun", "Wild")) +
+  scale_shape_manual(values = Shapes) +
+ theme_set(theme_classic() +
+             theme(legend.position = "top",
+                   text = element_text(size=20),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(color="black",
+                                              size=15),
+                   axis.text.y = element_text(color="black",
+                                              size=15),
+                   legend.text = element_text(color="black",
+                                              size=15)))
+
+
+plot_poop_count_intensity_pollendiet_2
+```
+
+```{r}
+ggsave("Poop_count_per_infection_intensity.pdf", plot_poop_count_intensity_pollendiet_2, width = 7, height = 5)
+```
+
+
+Lets extract the model means:
+```{r}
+library(emmeans)
+emmeans_negbin.mod6 <- emmeans(negbin.mod6,  ~ PollenDiet, type = "response")
+emmeans_negbin.mod6
+```
+
+Lets make a plot: 
+```{r}
+Colors <- c("orange","darkgray")
+pd<-position_dodge(0.9)
+
+
+# plot poop_count with all rounds included
+emmeans_negbin.mod1.df <- as.data.frame(emmeans_negbin.mod6)
+
+
+plot_poop_count<- ggplot(emmeans_negbin.mod1.df,
+                         aes(x=PollenDiet,
+                             y=response)) +
+  geom_bar(position = pd,
+           stat="identity",
+           width = 0.65,
+           size = 1, 
+           fill = Colors,
+           color = "black") + 
+  geom_errorbar(aes(ymin=response - SE,
+                    ymax=response + SE),
+                size=1, width=0.3,
+                position = pd) + 
+  ylab(expression(bold("No. of excretion events"))) + 
+  xlab(expression(bold("Pollen Diet"))) + 
+  scale_y_continuous(limits= c(0, 8.5),
+                     expand = c(0, 0)) + 
+  scale_x_discrete(labels = c(S = "Sunflower",
+                              W = "Wildflower Mix")) + 
+  theme_set(theme_classic() +
+             theme(text = element_text(size=20),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(face="bold",
+                                              color="black",
+                                              size=20),
+                   axis.text.y = element_text(face="bold",
+                                              color="black",
+                                              size=20),
+                   legend.text = element_text(face="bold",
+                                              color="black",
+                                              size=20)))
+ plot_poop_count
+```
+
+```{r}
+ggsave("Poop_count.pdf", plot_poop_count, width = 6, height = 5)
+```
+
+
+
+
+
+
+
+
+
+##Total area 
+
+First lets look at a summary of all of the raw data:
+```{r, warning=FALSE}
+
+total_area_summary1 <- image_gtt.df.noDead.noEggs %>% 
+  group_by(PollenDiet, InfectionTrt) %>% 
+  summarise(mean_tot_area = mean(total_area),
+            sd_tot_area = sd(total_area),
+            n = n())
+
+total_area_summary1
+```
+Based on the raw data we dont see much of a difference of area (aka volume of bee poop) between treatments.
+
+Lets assess the distribution of our repsonse variable. First a qq plot:
+```{r}
+qqp(image_gtt.df.noDead.noEggs$total_area, "norm")
+```
+
+The tails are slightly skewed. Let's look at the density plot:
+```{r}
+ggdensity(image_gtt.df.noDead.noEggs$total_area, 
+          main = "Density plot of total area",
+          xlab = "Total area")
+```
+
+Yep... look at the big ol' right tail. Lets run a Shapiro Wilks test for normality:
+```{r}
+shapiro.test(image_gtt.df.noDead.noEggs$total_area)
+```
+
+Looks like we can't assume a normal distribution for total area. We could log transform it... Or we could fit it with a gamma distribution. 
+```{r}
+log_total_area <- log1p(image_gtt.df.noDead.noEggs$total_area)
+
+ggdensity(log_total_area, 
+          main = "Density plot of log1p(total area)",
+          xlab = "log1p(Total area)")
+```
+That seems to have created a left tail skew. 
+```{r}
+qqp(log_total_area, "norm")
+```
+
+And the qq plot for the log transformed data looks like a terrible fit. The gamma distribution might be the better option.
+
+We need to add small noise to the total area values in order to fit a gamma distribution. This is standard practice.
+```{r}
+image_gtt.df.noDead.noEggs <- image_gtt.df.noDead.noEggs %>% 
+  mutate(total_area2 = total_area + 0.00000001)
+```
+
+
+For glmer models we have to scale and center our continuous predictors. Lets do that and then test the random effects for the best fit...
+```{r, message=FALSE, warning=FALSE}
+# Lets rescale the continuous variables so they are all on the same scale. This is advise by lme4 for the glmer's below. 
+image_gtt.df.noDead.noEggs$parasite.load.scaled <- scale(image_gtt.df.noDead.noEggs$Parasite.load)
+image_gtt.df.noDead.noEggs$NectarConsump.scaled <- scale(image_gtt.df.noDead.noEggs$NectarConsump)
+image_gtt.df.noDead.noEggs$PollenConsump.scaled <- scale(image_gtt.df.noDead.noEggs$PollenConsump)
+
+area.mod.full <- glmer(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + parasite.load.scaled +  (1|Microcolony/Round) + (1|Microcolony:MotherColony), family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.1 <- glmer(total_area2 ~  PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + parasite.load.scaled + (1|Microcolony/Round) , family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.2 <- glmer(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + parasite.load.scaled + (1|Microcolony:MotherColony) , family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.3 <- glmer(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + parasite.load.scaled + (1|Microcolony) , family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.3b <- glmer(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + parasite.load.scaled + (1|MotherColony) , family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.4 <- glmer(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + parasite.load.scaled + (1|Round) , family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.5 <- glm(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + parasite.load.scaled, family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.6 <- glm(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled, family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.7 <- glm(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + WingSize + parasite.load.scaled, family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+area.mod.reduced.8 <- glm(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump.scaled + NectarConsump.scaled + WingSize + parasite.load.scaled, family = Gamma(link = "inverse"),  image_gtt.df.noDead.noEggs)
+
+AIC(area.mod.full, area.mod.reduced.1, area.mod.reduced.2, area.mod.reduced.3, area.mod.reduced.3b, area.mod.reduced.4, area.mod.reduced.5, area.mod.reduced.6, area.mod.reduced.7, area.mod.reduced.8)
+```
+area.mod.reduced.5 is the best fit based on AIC (remeber that we chose nectar consumption over wingsize)
+
+```{r}
+Final.area.mod <- glm(total_area2 ~ PollenDiet*InfectionTrt + PollenConsump + NectarConsump, family = Gamma(link = "log"),  image_gtt.df.noDead.noEggs)
+summary(Final.area.mod)
+```
+
+
+```{r}
+Anova(Final.area.mod)
+```
+
+```{r}
+Final.area.mod2 <- glm(total_area2 ~ PollenDiet + PollenConsump + NectarConsump , family = Gamma(link = "log"),  image_gtt.df.noDead.noEggs)
+summary(Final.area.mod2)
+```
+
+```{r}
+Anova(Final.area.mod2)
+```
+
+
+
+
+
+Both pollen and nectar consumption had a significant effect on area (aka volume), which makes biologial sense. Pollen diet had a margiinally signifincant effect. The fractional beta coeffcient (0.0012432) suggests that the volume of poop from wildflower pollen bees was less than sunflower pollen fed bees!!! Wow! That is an awesome reuslt! 
+
+
+```{r, warning=FALSE}
+area.mod.noDead.noEggs_emmeans.df <- as.data.frame(emmeans(Final.area.mod2, ~ PollenDiet, type = "response"))
+area.mod.noDead.noEggs_emmeans.df
+```
+Lets plot the effect of pollen diet on area (aka volume)
+```{r}
+
+Colors <- c("orange","darkgray")
+pd<-position_dodge(0.9)
+plot_poop_area_NoDead_NoEggs <- ggplot(area.mod.noDead.noEggs_emmeans.df,
+                         aes(x=PollenDiet,
+                             y=response)) +
+  geom_bar(position = pd,
+           stat="identity",
+           width = 0.65,
+           size = 1, 
+           fill = Colors,
+           color = "black") + 
+  geom_errorbar(aes(ymin=response - SE,
+                    ymax=response + SE),
+                size=1, width=0.3,
+                position = pd) + 
+  ylab(expression(bold(Area~of~excrement~(mm^2), sep = ""))) + 
+  xlab(expression(bold("Pollen Diet"))) + 
+  scale_y_continuous(limits= c(0, 950),
+                     expand = c(0, 0)) + 
+  scale_x_discrete(labels = c(S = "Sunflower",
+                              W = "Wildflower Mix"))
+plot_poop_area_NoDead_NoEggs
+ 
+```
+
+```{r}
+ggsave("Poop_area.pdf", plot_poop_area_NoDead_NoEggs, width = 6, height = 5)
+```
+
+Let's estimate the effects of Nectar consumption on area. We have to re-run the model with covariates not scaled. They were only scaled for the glmer models and we dont need them for the glm. Also, scaling does not effect significance of terms. Unscaling will allow us make inferences from the beta coeffiecients. 
+```{r}
+area.mod.nodead.noeggs.noscale <- glm(total_area2 ~ PollenDiet+ PollenConsump + NectarConsump, family = Gamma(link = "log"),  image_gtt.df.noDead.noEggs)
+
+summary(area.mod.nodead.noeggs.noscale)
+```
+
+Nectar consumption coefficent:
+```{r}
+exp(area.mod.nodead.noeggs.noscale$coefficients["NectarConsump"])
+```
+Positive relationship between nectar consumption and the area of fecal deposits. The model indicates a  3.101491  increase in area per gram of nectar consumed. Inother words, a 310 mm2 increase per every 100 mg of nectar consumed. 
+
+Pollen consumption coefficient:
+```{r}
+exp(area.mod.nodead.noeggs.noscale$coefficients["PollenConsump"])
+```
+Similarly, there's a positive relationship between pollen consumption and area. The model indicates a massive 1097.033 mm2 increase per mg of pollen consumed.
+
+
+# Is there any effect of pollen diet treatment on amount of pollen consumed and amount of nectar consumed?
+```{r}
+summary(lm(PollenConsump ~ PollenDiet*InfectionTrt, data = image_gtt.df))
+```
+
+```{r}
+anova(lm(PollenConsump ~ PollenDiet*InfectionTrt, data = image_gtt.df))
+```
+
+```{r}
+emmeans(lm(PollenConsump ~ PollenDiet*InfectionTrt, data = image_gtt.df), ~ PollenDiet)
+```
+
+```{r}
+summary(lm(NectarConsump ~ PollenDiet*InfectionTrt, data = image_gtt.df))
+```
+
+```{r}
+anova(lm(NectarConsump ~ PollenDiet*InfectionTrt, data = image_gtt.df))
+```
+
+
+Let's model the relationship between volume and crithidia infection intensity for the two pollen diets. Does a greater volume of excrement correlate with infection intensity?
+
+Model:
+```{r}
+
+image_gtt.df.noDead.noEggs.infectedonly <- image_gtt.df.noDead.noEggs %>% 
+  filter(InfectionTrt == "I")
+
+Volume_intensityVsdiet <- glm(total_area2 ~ PollenDiet*Parasite.load + PollenConsump + NectarConsump, family = Gamma(link = "log"),  image_gtt.df.noDead.noEggs.infectedonly)
+summary(Volume_intensityVsdiet)
+
+Anova(Volume_intensityVsdiet)
+```
+
+```{r}
+Volume_intensityVsdiet2 <- glm(total_area2 ~ PollenDiet + Parasite.load + PollenConsump + NectarConsump, family = Gamma(link = "log"),  image_gtt.df.noDead.noEggs.infectedonly, na.action = na.exclude)
+summary(Volume_intensityVsdiet2)
+```
+
+```{r}
+Anova(Volume_intensityVsdiet2)
+```
+
+```{r}
+exp(Volume_intensityVsdiet2$coefficients["Parasite.load"])
+```
+
+```{r}
+
+100 * 0.9971275
+
+
+```
+
+```{r}
+
+preds_vol<-predict(Volume_intensityVsdiet2, type = "response", se.fit = TRUE, na.action = na.exclude)
+
+image_gtt.df.noDead.noEggs.infectedonly$vol_fit <- preds_vol$fit
+
+image_gtt.df.noDead.noEggs.infectedonly$vol_SEfit <- preds_vol$se.fit
+
+image_gtt.df.noDead.noEggs.infectedonly$vol_lwr <- image_gtt.df.noDead.noEggs.infectedonly$vol_fit - image_gtt.df.noDead.noEggs.infectedonly$vol_SEfit
+  
+image_gtt.df.noDead.noEggs.infectedonly$vol_upr <- image_gtt.df.noDead.noEggs.infectedonly$vol_fit + image_gtt.df.noDead.noEggs.infectedonly$vol_SEfit
+
+
+Colors <- c("orange","black")
+Shapes <- c(21, 24)
+
+plot_volume_intensity_pollendiet <- ggplot(image_gtt.df.noDead.noEggs.infectedonly, aes(x=Parasite.load,
+                y=vol_fit)) +
+  geom_smooth(se = TRUE, method = lm, level = 0.90, color = "black") +
+  #geom_ribbon(aes(ymin=vol_lwr, ymax=vol_upr), fill = "grey70", alpha = 0.3, linetype = 0) +
+  geom_point(aes(x=Parasite.load, y=total_area2)) +
+  ylab(expression(Area~of~excrement~(mm^2), sep = "")) + 
+  xlab(expression(italic(Crithidia)~infection~intensity~ "(cells * 0.02"~mu~L^-1*")", sep="")) + 
+ theme_set(theme_classic() +
+             theme(legend.position = "top",
+                   text = element_text(size=20),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(color="black",
+                                              size=15),
+                   axis.text.y = element_text(color="black",
+                                              size=15),
+                   legend.text = element_text(color="black",
+                                              size=15)))
+
+
+plot_volume_intensity_pollendiet
+```
+
+```{r}
+ggsave("Volume_Intensity.pdf", plot_volume_intensity_pollendiet, width = 7, height = 5)
+```
+
+
+# Let's make a multi-panel figures for the manuscript
+
+First: Fig 1: count (a) and volume (b)
+```{r}
+
+Colors <- c("orange","darkgray")
+
+Count_plot <- ggplot(emmeans_negbin.mod1.df,
+                         aes(x=PollenDiet,
+                             y=response)) +
+  geom_bar(position = pd,
+           stat="identity",
+           width = 0.65,
+           size = 1, 
+           fill = Colors,
+           color = "black") + 
+  geom_errorbar(aes(ymin=response - SE,
+                    ymax=response + SE),
+                size=1, width=0.3,
+                position = pd) + 
+  ylab("No. of excretion events") + 
+  scale_y_continuous(limits= c(0, 8.5),
+                     expand = c(0, 0)) + 
+  scale_x_discrete(labels = c(S = "Sun",
+                              W = "Wild")) + 
+  theme_set(theme_classic()) + 
+   theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(color="black",size=15),
+        axis.ticks.x=element_blank(), 
+        text = element_text(size=15),
+        axis.ticks = element_line(colour = "black",size = 1),
+        axis.line = element_line(colour = 'black', size = 1),
+        axis.text.y = element_text(color="black",size=15))
+            
+            
+Volume_plot <- ggplot(area.mod.noDead.noEggs_emmeans.df,
+                         aes(x=PollenDiet,
+                             y=response)) +
+  geom_bar(position = pd,
+           stat="identity",
+           width = 0.65,
+           size = 1, 
+           fill = Colors,
+           color = "black") + 
+  geom_errorbar(aes(ymin=response - SE,
+                    ymax=response + SE),
+                size=1, width=0.3,
+                position = pd) + 
+  ylab(expression(Area~of~excrement~(mm^2), sep = "")) + 
+  scale_y_continuous(limits= c(0, 950),
+                     expand = c(0, 0)) + 
+  scale_x_discrete(labels = c(S = "Sun",
+                              W = "Wild")) + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(color="black",size=15),
+        axis.ticks.x=element_blank(), 
+        text = element_text(size=15),
+        axis.ticks = element_line(colour = "black",size = 1),
+        axis.line = element_line(colour = 'black', size = 1),
+        axis.text.y = element_text(color="black",size=15))
+
+# required packages 
+
+library(ggplot2)
+library(cowplot)
+
+plot_grid(Count_plot, Volume_plot,
+          labels=c("a", "b"),
+          ncol = 2,
+          nrow = 1,
+          label_size = 20,
+          align = "v")
+
+ggsave("Count_Volume_Panel.pdf", height = 5, width =8)
+
+
+```
+
+Second, Figure 2: intensity and count (a) intensity and volume (b) intensity and rate (c)
+```{r}
+library(cowplot)
+
+Colors <- c("orange","black")
+Shapes <- c(21, 24)
+
+intensity_count_plot <- ggplot(image_gtt.df.noDead.noEggs.infectedonly, aes(x=Parasite.load,
+                y=fit,
+                color = PollenDiet)) +
+  geom_line(aes(x=Parasite.load,
+                y=fit,
+                color = PollenDiet), size = 1) +
+  geom_ribbon(aes(ymin=lwr, ymax=upr), fill = "grey70", alpha = 0.3, linetype = 0) +
+  geom_point(aes(x=Parasite.load, y=poop_count, color = PollenDiet)) +
+  ylab("No. of excretion events") + 
+  #xlab(expression(italic(Crithidia)~infection~intensity~ "(cells * 0.02"~mu~L^-1*")", sep="")) + 
+  xlab(NULL)+
+  scale_colour_manual(values = Colors, name = "Diet:", labels = c("Sun", "Wild")) +
+  scale_shape_manual(values = Shapes) +
+ theme_set(theme_classic() +
+             theme(legend.position = "top",
+                   text = element_text(size=20),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(color="black",
+                                              size=15),
+                   axis.text.y = element_text(color="black",
+                                              size=15),
+                   legend.text = element_text(color="black",
+                                              size=15)))
+
+
+
+
+intesity_volume_plot <- ggplot(image_gtt.df.noDead.noEggs.infectedonly, aes(x=Parasite.load,
+                y=vol_fit)) +
+  geom_smooth(se = TRUE, method = lm, level = 0.90, color = "black") +
+  #geom_ribbon(aes(ymin=vol_lwr, ymax=vol_upr), fill = "grey70", alpha = 0.3, linetype = 0) +
+  geom_point(aes(x=Parasite.load, y=total_area2)) +
+  ylab(expression(Area~of~excrement~(mm^2), sep = "")) + 
+    #xlab(expression(italic(Crithidia)~infection~intensity~ "(cells * 0.02"~mu~L^-1*")", sep="")) + 
+  xlab(NULL) + 
+ theme_set(theme_classic() +
+             theme(legend.position = "top",
+                   text = element_text(size=20),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(color="black",
+                                              size=15),
+                   axis.text.y = element_text(color="black",
+                                              size=15),
+                   legend.text = element_text(color="black",
+                                              size=15)))
+
+
+
+intensity_rate_plot <- ggplot(pooprate.df_infectedonly, aes(x=Parasite.load,
+                y=fit)) +
+  geom_smooth(se = TRUE, method = lm, level = 0.90, color = "black") +
+  #geom_ribbon(aes(ymin=lwr, ymax=upr), fill = "grey70", alpha = 0.3, linetype = 0) +
+  geom_point(aes(x=Parasite.load, y=slope2)) +
+  ylab(expression(~Excretion~rate~ "(events * 2"~hr^-1*")")) + 
+  #xlab(expression(italic(Crithidia)~infection~intensity~ "(cells * 0.02"~mu~L^-1*")", sep="")) + 
+  xlab(NULL) +
+ theme_set(theme_classic() +
+             theme(legend.position = "top",
+                   text = element_text(size=20),
+                   axis.ticks = element_line(colour = "black",
+                                             size = 1),
+                   axis.line = element_line(colour = 'black',
+                                            size = 1),
+                   axis.text.x = element_text(color="black",
+                                              size=15),
+                   axis.text.y = element_text(color="black",
+                                              size=15),
+                   legend.text = element_text(color="black",
+                                              size=15)))
+
+plot_row <- plot_grid(intensity_count_plot, intesity_volume_plot, intensity_rate_plot,
+          labels=c("a", "b", "c"),
+          ncol = 3,
+          nrow = 1,
+          label_size = 20,
+          align = "v")
+
+# now add the title
+title <- ggdraw() + 
+  draw_label(
+    expression(italic(Crithidia)~infection~intensity~ "(cells * 0.02"~mu~L^-1*")", sep=""),
+    size = 18,
+    fontface = "bold"
+  ) +
+  theme(
+    # add margin on the left of the drawing canvas,
+    # so title is aligned with left edge of first plot
+    plot.margin = margin(0, 10, 10, 0)
+  )
+plot_grid(
+  plot_row, title,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(1, 0.1),
+  align = "vh"
+)
+
+ggsave("Intensity_Count_Volume_Rate_Panel.pdf", height = 6, width =11)
+
+
+```
+
+
+```{r}
+
+testmodel <- glm.nb(poop_count ~ PollenDiet*InfectionTrt + PollenDiet*PollenConsump + NectarConsump + Parasite.load, data = image_gtt.df.noDead.noEggs)
+
+summary(testmodel)
+# Call:
+# glm.nb(formula = poop_count ~ PollenDiet * InfectionTrt + PollenDiet * 
+#     PollenConsump + NectarConsump + Parasite.load, data = image_gtt.df.noDead.noEggs, 
+#     init.theta = 10.624484, link = log)
+# 
+# Deviance Residuals: 
+#     Min       1Q   Median       3Q      Max  
+# -3.1994  -0.6467  -0.1164   0.5968   2.5690  
+# 
+# Coefficients:
+#                             Estimate Std. Error z value Pr(>|z|)    
+# (Intercept)                1.401e+00  2.326e-01   6.024  1.7e-09 ***
+# PollenDietW               -1.833e-01  3.822e-01  -0.479    0.632    
+# InfectionTrtI              3.795e-02  1.734e-01   0.219    0.827    
+# PollenConsump              1.580e+01  7.953e+00   1.987    0.047 *  
+# NectarConsump              3.440e-01  2.921e-01   1.177    0.239    
+# Parasite.load             -9.012e-05  1.098e-03  -0.082    0.935    
+# PollenDietW:InfectionTrtI  2.140e-01  2.084e-01   1.027    0.304    
+# PollenDietW:PollenConsump -1.423e+01  9.853e+00  -1.444    0.149    
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# (Dispersion parameter for Negative Binomial(10.6245) family taken to be 1)
+# 
+#     Null deviance: 121.46  on 103  degrees of freedom
+# Residual deviance: 108.70  on  96  degrees of freedom
+#   (6 observations deleted due to missingness)
+# AIC: 524.87
+# 
+# Number of Fisher Scoring iterations: 1
+# 
+# 
+#               Theta:  10.62 
+#           Std. Err.:  4.34 
+# 
+#  2 x log-likelihood:  -506.865 
+
+Anova(testmodel)
+# Analysis of Deviance Table (Type II tests)
+# 
+# Response: poop_count
+#                          LR Chisq Df Pr(>Chisq)  
+# PollenDiet                 5.8464  1    0.01561 *
+# InfectionTrt               1.1957  1    0.27417  
+# PollenConsump              1.8553  1    0.17317  
+# NectarConsump              1.3759  1    0.24081  
+# Parasite.load              0.0071  1    0.93285  
+# PollenDiet:InfectionTrt    1.0556  1    0.30422  
+# PollenDiet:PollenConsump   2.1274  1    0.14468  
+# ---
+
+
+testmodel2 <- glm(total_area2 ~ PollenDiet*InfectionTrt + PollenDiet*PollenConsump + NectarConsump , family = Gamma(link = "log"),  image_gtt.df.noDead.noEggs)
+summary(testmodel2)
+Call:
+# glm(formula = total_area2 ~ PollenDiet * InfectionTrt + PollenDiet * 
+#     PollenConsump + NectarConsump, family = Gamma(link = "log"), 
+#     data = image_gtt.df.noDead.noEggs)
+# 
+# Deviance Residuals: 
+#     Min       1Q   Median       3Q      Max  
+# -6.8909  -0.6149  -0.1798   0.2767   1.3613  
+# 
+# Coefficients:
+#                            Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)                 5.28070    0.30296  17.431  < 2e-16 ***
+# PollenDietW                -0.08177    0.48648  -0.168  0.86686    
+# InfectionTrtI              -0.01460    0.20032  -0.073  0.94205    
+# PollenConsump              25.15950   11.31229   2.224  0.02844 *  
+# NectarConsump               1.11958    0.38486   2.909  0.00449 ** 
+# PollenDietW:InfectionTrtI   0.05513    0.27506   0.200  0.84156    
+# PollenDietW:PollenConsump -17.61165   13.39807  -1.314  0.19175    
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# (Dispersion parameter for Gamma family taken to be 0.4898638)
+# 
+#     Null deviance: 109.50  on 104  degrees of freedom
+# Residual deviance: 103.84  on  98  degrees of freedom
+#   (5 observations deleted due to missingness)
+# AIC: 1523.1
+# 
+# Number of Fisher Scoring iterations: 8
+
+Anova(testmodel2)
+
+# Analysis of Deviance Table (Type II tests)
+# 
+# Response: total_area2
+#                          LR Chisq Df Pr(>Chisq)   
+# PollenDiet                 4.4762  1   0.034370 * 
+# InfectionTrt               0.0108  1   0.917096   
+# PollenConsump              4.5191  1   0.033518 * 
+# NectarConsump              7.8127  1   0.005188 **
+# PollenDiet:InfectionTrt    0.0396  1   0.842354   
+# PollenDiet:PollenConsump   2.0235  1   0.154878   
+# ---
+```
+
+```{r}
+sessionInfo()
+```
+
